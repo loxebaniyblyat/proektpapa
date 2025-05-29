@@ -1,0 +1,72 @@
+requests/aiohttp – для HTTP-запросов.
+
+BeautifulSoup/lxml – для парсинга HTML.
+
+selenium – если сайты используют JavaScript.
+
+pandas – для анализа данных (опционально).
+
+
+
+
+
+
+
+
+import requests
+from bs4 import BeautifulSoup
+
+def search_product(product_name):
+    # Формируем URL для поиска (например, Wildberries)
+    url = f"https://www.wildberries.ru/catalog/0/search.aspx?search={product_name}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Парсим карточки товаров (зависит от структуры сайта!)
+        products = []
+        for item in soup.select(".product-card"):
+            name = item.select_one(".product-name").text.strip()
+            price = item.select_one(".price").text.strip()
+            products.append({"name": name, "price": price})
+        
+        return products
+    except Exception as e:
+        print(f"Ошибка: {e}")
+        return []
+
+def analyze_prices(products):
+    if not products:
+        print("Товары не найдены.")
+        return
+    
+    # Преобразуем цены в числа
+    prices = []
+    for product in products:
+        price_str = product["price"].replace("₽", "").replace(" ", "").strip()
+        try:
+            price = float(price_str)
+            prices.append(price)
+        except ValueError:
+            continue
+    
+    if not prices:
+        print("Не удалось извлечь цены.")
+        return
+    
+    min_price = min(prices)
+    max_price = max(prices)
+    
+    print(f"Найдено товаров: {len(products)}")
+    print(f"Минимальная цена: {min_price} ₽")
+    print(f"Максимальная цена: {max_price} ₽")
+
+if __name__ == "__main__":
+    product = input("Введите название товара: ")
+    found_products = search_product(product)
+    analyze_prices(found_products)
