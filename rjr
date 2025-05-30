@@ -14,25 +14,31 @@ pandas
 
 import tkinter as tk
 from tkinter import ttk, messagebox
-import requests
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
-from fake_useragent import UserAgent
 import re
-from concurrent.futures import ThreadPoolExecutor
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from fake_useragent import UserAgent
 
 class PriceComparatorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Сравнитель цен маркетплейсов")
-        self.root.geometry("600x400")
+        self.root.geometry("800x600")
         
-        # Стиль
+        # Настройка стилей
         self.style = ttk.Style()
         self.style.configure('TFrame', background='#f0f0f0')
         self.style.configure('TLabel', background='#f0f0f0', font=('Arial', 10))
-        self.style.configure('TButton', font=('Arial', 10))
-        self.style.configure('Header.TLabel', font=('Arial', 12, 'bold'))
+        self.style.configure('TButton', font=('Arial', 10), padding=5)
+        self.style.configure('Header.TLabel', font=('Arial', 14, 'bold'))
+        self.style.configure('Best.TLabel', foreground='green')
+        self.style.configure('Worst.TLabel', foreground='red')
         
         self.create_widgets()
     
@@ -43,31 +49,32 @@ class PriceComparatorApp:
         
         # Заголовок
         header = ttk.Label(main_frame, text="Сравнение цен на маркетплейсах", style='Header.TLabel')
-        header.pack(pady=(0, 10))
+        header.pack(pady=(0, 15))
         
         # Поле ввода
         input_frame = ttk.Frame(main_frame)
         input_frame.pack(fill=tk.X, pady=5)
         
-        ttk.Label(input_frame, text="Введите название товара:").pack(side=tk.LEFT)
-        self.product_entry = ttk.Entry(input_frame, width=40)
-        self.product_entry.pack(side=tk.LEFT, padx=5)
+        ttk.Label(input_frame, text="Введите название товара:").pack(side=tk.LEFT, padx=5)
+        self.product_entry = ttk.Entry(input_frame, width=50)
+        self.product_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         self.product_entry.bind('<Return>', lambda e: self.start_search())
         
-        search_btn = ttk.Button(input_frame, text="Поиск", command=self.start_search)
-        search_btn.pack(side=tk.LEFT)
+        search_btn = ttk.Button(input_frame, text="Найти цены", command=self.start_search)
+        search_btn.pack(side=tk.LEFT, padx=5)
         
         # Результаты
         results_frame = ttk.Frame(main_frame)
-        results_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        results_frame.pack(fill=tk.BOTH, expand=True, pady=(15, 0))
         
+        # Таблица результатов
         self.tree = ttk.Treeview(results_frame, columns=('marketplace', 'price', 'url'), show='headings')
         self.tree.heading('marketplace', text='Маркетплейс')
         self.tree.heading('price', text='Цена (руб)')
         self.tree.heading('url', text='Ссылка')
-        self.tree.column('marketplace', width=150)
-        self.tree.column('price', width=100)
-        self.tree.column('url', width=300)
+        self.tree.column('marketplace', width=150, anchor=tk.CENTER)
+        self.tree.column('price', width=100, anchor=tk.CENTER)
+        self.tree.column('url', width=400)
         
         scrollbar = ttk.Scrollbar(results_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscroll=scrollbar.set)
@@ -77,120 +84,143 @@ class PriceComparatorApp:
         
         # Статус бар
         self.status_var = tk.StringVar()
-        self.status_var.set("Готов к поиску")
+        self.status_var.set("Готов к поиску. Введите название товара и нажмите кнопку.")
         status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN)
-        status_bar.pack(fill=tk.X, pady=(5, 0))
+        status_bar.pack(fill=tk.X, pady=(10, 0))
     
     def start_search(self):
         """Запуск поиска в отдельном потоке"""
         product = self.product_entry.get().strip()
         if not product:
-            messagebox.showwarning("Ошибка", "Введите название товара")
+            messagebox.showwarning("Ошибка", "Пожалуйста, введите название товара")
             return
         
         # Очистка предыдущих результатов
         for item in self.tree.get_children():
             self.tree.delete(item)
         
-        self.status_var.set("Идет поиск...")
+        self.status_var.set(f"Идет поиск цен для: '{product}'...")
         self.root.config(cursor="watch")
         self.root.update()
         
-        # Запуск в отдельном потоке, чтобы не блокировать GUI
+        # Запуск в отдельном потоке
         threading.Thread(target=self.search_prices, args=(product,), daemon=True).start()
     
     def search_prices(self, product_name):
         """Поиск цен на маркетплейсах"""
         try:
-            parsers = [self.parse_ozon, self.parse_wildberries, self.parse_avito]
+            parsers = [self.parse_ozon, self.parse_wildberries]
             
-            with ThreadPoolExecutor() as executor:
+            with ThreadPoolExecutor(max_workers=2) as executor:
                 results = list(filter(None, executor.map(lambda p: p(product_name), parsers)))
             
             if not results:
-                self.show_message("Не удалось получить цены. Попробуйте другой товар.")
+                self.show_message("❌ Цены не найдены. Попробуйте другой товар или проверьте соединение.")
                 return
             
             # Сортировка по цене
             sorted_results = sorted(results, key=lambda x: x['price'])
             
-            # Вывод результатов в таблицу
-            for result in sorted_results:
-                self.tree.insert('', tk.END, values=(
-                    result['marketplace'],
-                    result['price'],
-                    result['url']
-                ))
+            # Вывод результатов в GUI
+            self.root.after(0, self.display_results, sorted_results)
             
-            # Подсветка лучшей цены
-            if len(sorted_results) > 1:
-                self.tree.tag_configure('best', background='#d4edda')
-                self.tree.item(self.tree.get_children()[0], tags=('best',))
-                
-                self.tree.tag_configure('worst', background='#f8d7da')
-                self.tree.item(self.tree.get_children()[-1], tags=('worst',))
-            
-            self.status_var.set(f"Найдено {len(results)} результатов. Лучшая цена: {sorted_results[0]['price']} руб. на {sorted_results[0]['marketplace']}")
+            self.show_message(f"✅ Найдено {len(results)} результатов. Лучшая цена: {sorted_results[0]['price']} руб. на {sorted_results[0]['marketplace']}")
         
         except Exception as e:
-            self.show_message(f"Ошибка: {str(e)}")
+            self.show_message(f"⚠ Ошибка: {str(e)}")
         finally:
             self.root.config(cursor="")
+    
+    def display_results(self, results):
+        """Отображение результатов в таблице"""
+        for result in results:
+            self.tree.insert('', tk.END, values=(
+                result['marketplace'],
+                result['price'],
+                result['url']
+            ))
+        
+        # Подсветка лучшей и худшей цены
+        if len(results) > 1:
+            self.tree.tag_configure('best', background='#d4edda')
+            self.tree.item(self.tree.get_children()[0], tags=('best',))
+            
+            self.tree.tag_configure('worst', background='#f8d7da')
+            self.tree.item(self.tree.get_children()[-1], tags=('worst',))
+    
+    def parse_ozon(self, product_name):
+        """Парсинг Ozon с Selenium"""
+        options = Options()
+        options.add_argument("--headless")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument(f"user-agent={UserAgent().random}")
+        
+        driver = None
+        try:
+            driver = webdriver.Chrome(options=options)
+            driver.get(f"https://www.ozon.ru/search/?text={product_name}")
+            
+            # Ожидание загрузки
+            WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "span[class*='tsBody']"))
+            )
+            
+            # Прокрутка для полной загрузки
+            driver.execute_script("window.scrollBy(0, 500);")
+            
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            price_element = soup.select_one("span[class*='tsBody'][style*='color']")
+            
+            if price_element:
+                price = int(re.sub(r'[^\d]', '', price_element.text))
+                return {
+                    'marketplace': 'Ozon',
+                    'price': price,
+                    'url': driver.current_url
+                }
+        except Exception as e:
+            print(f"Ошибка парсинга Ozon: {e}")
+        finally:
+            if driver:
+                driver.quit()
+        return None
+    
+    def parse_wildberries(self, product_name):
+        """Парсинг Wildberries с Selenium"""
+        options = Options()
+        options.add_argument("--headless")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument(f"user-agent={UserAgent().random}")
+        
+        driver = None
+        try:
+            driver = webdriver.Chrome(options=options)
+            driver.get(f"https://www.wildberries.ru/catalog/0/search.aspx?search={product_name}")
+            
+            WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "span.final-price"))
+            )
+            
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            price_element = soup.find('span', class_='final-price')
+            
+            if price_element:
+                price = int(re.sub(r'[^\d]', '', price_element.text))
+                return {
+                    'marketplace': 'Wildberries',
+                    'price': price,
+                    'url': driver.current_url
+                }
+        except Exception as e:
+            print(f"Ошибка парсинга Wildberries: {e}")
+        finally:
+            if driver:
+                driver.quit()
+        return None
     
     def show_message(self, message):
         """Показать сообщение в GUI потоке"""
         self.root.after(0, lambda: self.status_var.set(message))
-    
-    def parse_ozon(self, product_name):
-        """Парсинг Ozon"""
-        try:
-            url = f"https://www.ozon.ru/search/?text={product_name}"
-            headers = {'User-Agent': UserAgent().random}
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.text, 'html.parser')
-            price_element = soup.find('span', {'class': re.compile(r'tsBody[0-9]')})
-            
-            if price_element:
-                price = int(re.sub(r'[^\d]', '', price_element.text))
-                return {'marketplace': 'Ozon', 'price': price, 'url': url}
-        except:
-            return None
-    
-    def parse_wildberries(self, product_name):
-        """Парсинг Wildberries"""
-        try:
-            url = f"https://www.wildberries.ru/catalog/0/search.aspx?search={product_name}"
-            headers = {'User-Agent': UserAgent().random}
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.text, 'html.parser')
-            price_element = soup.find('span', {'class': 'final-price'})
-            
-            if price_element:
-                price = int(re.sub(r'[^\d]', '', price_element.text))
-                return {'marketplace': 'Wildberries', 'price': price, 'url': url}
-        except:
-            return None
-    
-    def parse_avito(self, product_name):
-        """Парсинг Avito"""
-        try:
-            url = f"https://www.avito.ru/all?q={product_name}"
-            headers = {'User-Agent': UserAgent().random}
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.text, 'html.parser')
-            price_element = soup.find('meta', {'itemprop': 'price'})
-            
-            if price_element:
-                price = int(price_element['content'])
-                return {'marketplace': 'Avito', 'price': price, 'url': url}
-        except:
-            return None
 
 if __name__ == "__main__":
     root = tk.Tk()
