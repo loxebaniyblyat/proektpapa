@@ -15,58 +15,133 @@ pandas – для анализа данных (опционально).
 
 import requests
 from bs4 import BeautifulSoup
+from fake_useragent import UserAgent
+from concurrent.futures import ThreadPoolExecutor
+import time
+import re
 
-def search_product(product_name):
-    # Формируем URL для поиска (например, Wildberries)
-    url = f"https://www.wildberries.ru/catalog/0/search.aspx?search={product_name}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
-    
+# Настройки
+HEADERS = {
+    'User-Agent': UserAgent().random,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
+    'Accept-Encoding': 'gzip, deflate, br',
+}
+
+PROXIES = {}  # Можно добавить прокси при необходимости
+
+
+def get_page(url):
+    """Получение страницы с обработкой ошибок"""
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=HEADERS, proxies=PROXIES, timeout=10)
         response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Парсим карточки товаров (зависит от структуры сайта!)
-        products = []
-        for item in soup.select(".product-card"):
-            name = item.select_one(".product-name").text.strip()
-            price = item.select_one(".price").text.strip()
-            products.append({"name": name, "price": price})
-        
-        return products
+        return response.text
     except Exception as e:
-        print(f"Ошибка: {e}")
-        return []
+        print(f"Ошибка при запросе {url}: {e}")
+        return None
 
-def analyze_prices(products):
-    if not products:
-        print("Товары не найдены.")
+
+def parse_ozon(product_name):
+    """Парсинг Ozon с обновленными селекторами"""
+    try:
+        url = f"https://www.ozon.ru/search/?text={product_name}"
+        html = get_page(url)
+        if not html:
+            return None
+
+        soup = BeautifulSoup(html, 'html.parser')
+
+        # Новые селекторы для Ozon (могут потребовать обновления)
+        price_element = soup.find('span', {'class': re.compile(r'tsBody[0-9]')})
+        if price_element:
+            price = int(re.sub(r'[^\d]', '', price_element.text))
+            return {'marketplace': 'Ozon', 'price': price, 'url': url}
+    except Exception as e:
+        print(f"Ошибка парсинга Ozon: {e}")
+    return None
+
+
+def parse_wildberries(product_name):
+    """Парсинг Wildberries"""
+    try:
+        url = f"https://www.wildberries.ru/catalog/0/search.aspx?search={product_name}"
+        html = get_page(url)
+        if not html:
+            return None
+
+        soup = BeautifulSoup(html, 'html.parser')
+
+        # Селекторы для Wildberries
+        price_element = soup.find('span', {'class': 'final-price'})
+        if price_element:
+            price = int(re.sub(r'[^\d]', '', price_element.text))
+            return {'marketplace': 'Wildberries', 'price': price, 'url': url}
+    except Exception as e:
+        print(f"Ошибка парсинга Wildberries: {e}")
+    return None
+
+
+def parse_avito(product_name):
+    """Парсинг Avito (как альтернатива)"""
+    try:
+        url = f"https://www.avito.ru/all?q={product_name}"
+        html = get_page(url)
+        if not html:
+            return None
+
+        soup = BeautifulSoup(html, 'html.parser')
+
+        price_element = soup.find('meta', {'itemprop': 'price'})
+        if price_element:
+            price = int(price_element['content'])
+            return {'marketplace': 'Avito', 'price': price, 'url': url}
+    except Exception as e:
+        print(f"Ошибка парсинга Avito: {e}")
+    return None
+
+
+def compare_prices(product_name):
+    """Сравнение цен с обработкой ошибок"""
+    print(f"\nПоиск цен для: {product_name}")
+
+    parsers = [parse_ozon, parse_wildberries, parse_avito]
+
+    with ThreadPoolExecutor() as executor:
+        results = list(filter(None, executor.map(lambda p: p(product_name), parsers)))
+
+    if not results:
+        print("Не удалось получить цены. Возможные причины:")
+        print("- Сайты заблокировали запросы")
+        print("- Изменилась структура страниц")
+        print("- Требуется использование Selenium для динамического контента")
         return
-    
-    # Преобразуем цены в числа
-    prices = []
-    for product in products:
-        price_str = product["price"].replace("₽", "").replace(" ", "").strip()
-        try:
-            price = float(price_str)
-            prices.append(price)
-        except ValueError:
-            continue
-    
-    if not prices:
-        print("Не удалось извлечь цены.")
-        return
-    
-    min_price = min(prices)
-    max_price = max(prices)
-    
-    print(f"Найдено товаров: {len(products)}")
-    print(f"Минимальная цена: {min_price} ₽")
-    print(f"Максимальная цена: {max_price} ₽")
+
+    sorted_results = sorted(results, key=lambda x: x['price'])
+
+    print("\nРезультаты:")
+    for item in sorted_results:
+        print(f"{item['marketplace']}: {item['price']} руб. | Ссылка: {item['url']}")
+
+    print(f"\nСамый выгодный вариант: {sorted_results[0]['marketplace']} за {sorted_results[0]['price']} руб.")
+
+
+def main():
+    print("=== Сравнитель цен маркетплейсов v2 ===")
+    print("Введите название товара (или 'выход' для завершения)")
+
+    while True:
+        query = input("\nВведите запрос: ").strip()
+        if query.lower() in ('выход', 'exit', 'quit'):
+            break
+
+        if query:
+            start_time = time.time()
+            compare_prices(query)
+            print(f"\nЗавершено за {time.time() - start_time:.2f} сек")
+        else:
+            print("Пожалуйста, введите название товара")
+
 
 if __name__ == "__main__":
-    product = input("Введите название товара: ")
-    found_products = search_product(product)
-    analyze_prices(found_products)
+    main()
